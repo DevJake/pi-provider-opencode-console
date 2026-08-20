@@ -62,5 +62,9 @@
   },
   "engines": {
     "node": ">=22.19.0"
+  },
+  "allowScripts": {
+    "@google/genai@1.52.0": true,
+    "protobufjs@7.6.5": true
   }
 }
