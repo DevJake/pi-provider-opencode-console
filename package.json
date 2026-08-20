@@ -1,0 +1,66 @@
+{
+  "name": "pi-provider-opencode-console",
+  "version": "0.1.0",
+  "description": "Pi provider for OpenCode Console via device-auth login and live model discovery",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "opencode-console",
+    "ai-provider"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/grikomsn/pi-provider-opencode-console.git"
+  },
+  "bugs": {
+    "url": "https://github.com/grikomsn/pi-provider-opencode-console/issues"
+  },
+  "homepage": "https://github.com/grikomsn/pi-provider-opencode-console#readme",
+  "files": [
+    "src",
+    "assets/cover.jpg",
+    "CHANGELOG.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "package": "npm pack --dry-run",
+    "changeset": "changeset",
+    "version": "changeset version"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.31.0",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
