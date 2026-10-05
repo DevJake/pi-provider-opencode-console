@@ -22,7 +22,24 @@ export type ApiKind =
 	| "openai-responses"
 	| "google-generative-ai";
 
-export function resolveRoute(modelId: string, npm?: string): ApiKind {
+/** Public chat-completions/catalog base of the Console (former Zen) gateway. */
+export const CONSOLE_API_BASE_URL = "https://opencode.ai/zen/v1";
+/** Public model-catalog/chat base of the Go (subscription, `lite` list) gateway. */
+export const GO_API_BASE_URL = "https://opencode.ai/zen/go/v1";
+
+/**
+ * `OpenCodeMode` mirrors upstream's two auth systems after the Zen→Console
+ * merge: both Console and Go authenticate device-code sessions via the shared
+ * Console device flow, and both accept workspace `sk-` service keys.
+ */
+export type OpenCodeMode = "console" | "go";
+
+/** Public `/models` catalog base for a mode (console zen `full`, go `lite`). */
+export function apiBaseForMode(mode: OpenCodeMode): string {
+	return mode === "go" ? GO_API_BASE_URL : CONSOLE_API_BASE_URL;
+}
+
+export function resolveRoute(modelId: string, npm?: string, mode: OpenCodeMode = "console"): ApiKind {
 	const pkg = (npm ?? "").toLowerCase();
 	if (pkg.includes("anthropic")) return "anthropic-messages";
 	if (pkg.includes("google")) return "google-generative-ai";
@@ -30,6 +47,15 @@ export function resolveRoute(modelId: string, npm?: string): ApiKind {
 	// Fallback heuristics by model id.
 	if (/^gpt-/i.test(modelId)) return "openai-responses";
 	if (/^claude-/i.test(modelId)) return "anthropic-messages";
+	// Family-wide routes (sibling parity): every live grok*, muse-spark* and
+	// qwen* model on the gateways is responses or messages, and models.dev
+	// omits `npm` for some of them — the id prefix is the only signal left.
+	// Family-scoped: minimax and gemini only appear on their own gateway.
+	if (/^grok(?:-|$)/i.test(modelId)) return "openai-responses";
+	if (/^muse-spark-/i.test(modelId)) return "openai-responses";
+	if (/^qwen/i.test(modelId)) return "anthropic-messages";
+	if (mode === "go" && /^minimax-/i.test(modelId)) return "anthropic-messages";
+	if (mode === "console" && /^gemini-/i.test(modelId)) return "google-generative-ai";
 	return "openai-completions";
 }
 

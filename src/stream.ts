@@ -105,6 +105,8 @@ const apiMap: Record<ApiKind, () => ProviderStreams> = {
 
 export interface StreamContext {
 	accessToken: string;
+	/** Set when the token is a static service key (401s are terminal). */
+	serviceKey?: boolean;
 	orgId?: string;
 	requestId?: string;
 	clientName?: string;
@@ -140,6 +142,8 @@ export function streamConsole(
 	context: Context,
 	streamCtx: StreamContext,
 	options?: SimpleStreamOptions,
+	/** Optional one-shot loader that runs before the first request. */
+	initialLoad?: () => Promise<StreamContext>,
 ): AssistantMessageEventStream {
 	const stream = createAssistantMessageEventStream();
 	(async () => {
@@ -163,6 +167,7 @@ export function streamConsole(
 			void routeFor(apiKind);
 
 			let ctx = streamCtx;
+			if (initialLoad) ctx = { ...streamCtx, ...(await initialLoad()) };
 			let currentOptions: SimpleStreamOptions | undefined = options;
 			let usedAuthRetry = false;
 			let transientRetries = 0;
@@ -180,9 +185,12 @@ export function streamConsole(
 				if (ctx.orgId) headers["x-opencode-org-id"] = ctx.orgId;
 				if (ctx.requestId) headers["x-opencode-request"] = ctx.requestId;
 
+				// The auth token: the loaded session/key context wins, falling
+				// back to the runtime-resolved `options.apiKey` (pi's auth
+				// resolution refreshes OAuth and injects service keys upstream).
 				const innerOpts: SimpleStreamOptions = {
 					...currentOptions,
-					apiKey: ctx.accessToken,
+					apiKey: ctx.accessToken || currentOptions?.apiKey,
 					headers,
 				};
 
@@ -219,7 +227,8 @@ export function streamConsole(
 
 				const status = errorMessage ? statusFromErrorMessage(errorMessage) : undefined;
 				// 401: the access token was rejected — force-refresh once and retry.
-				if (status === 401 && forwarded === 0 && !usedAuthRetry && ctx.refreshSession) {
+				// Service keys never rotate, so a rejection is terminal for them.
+				if (status === 401 && !ctx.serviceKey && forwarded === 0 && !usedAuthRetry && ctx.refreshSession) {
 					usedAuthRetry = true;
 					ctx = await ctx.refreshSession();
 					continue;
@@ -268,8 +277,9 @@ export function streamConsole(
 
 /**
  * Same as `streamConsole` but resolves the access token + orgId lazily via
- * `getSession`, which is invoked with `{ force: true }` when the server
- * answers 401 so the session can force-refresh its access token.
+ * `getSession`: it runs once *before the first request* (fresh, not
+ * force-refreshed) and again with `{ force: true }` when the server answers
+ * 401 so the session can force-refresh its access token.
  * Used by the `streamSimple` handler so that session loading happens inside
  * the returned stream's async loop (preserving the synchronous-return
  * contract).
@@ -280,8 +290,14 @@ export function streamConsoleWithSession(
 	getSession: (opts?: { force?: boolean }) => Promise<StreamContext>,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	return streamConsole(model, context, {
-		accessToken: "",
-		refreshSession: async () => getSession({ force: true }),
-	}, options);
+	return streamConsole(
+		model,
+		context,
+		{
+			accessToken: "",
+			refreshSession: async () => getSession({ force: true }),
+		},
+		options,
+		() => getSession({ force: false }),
+	);
 }

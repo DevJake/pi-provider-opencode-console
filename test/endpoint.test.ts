@@ -56,3 +56,24 @@ test("baseUrlFor keeps google-generative-ai base", () => {
 		"https://generativelanguage.googleapis.com/v1beta",
 	);
 });
+
+test("resolveRoute family heuristics (sibling parity)", () => {
+	// Grok and Muse Spark families are Responses upstream even when models.dev omits npm.
+	assert.equal(resolveRoute("grok-4.7", undefined), "openai-responses");
+	assert.equal(resolveRoute("grok-build-0.1", ""), "openai-responses");
+	assert.equal(resolveRoute("muse-spark-2", ""), "openai-responses");
+	// Qwen tiers are Messages upstream on both gateways.
+	assert.equal(resolveRoute("qwen3.8-max", ""), "anthropic-messages");
+	// Mode-scoped families.
+	assert.equal(resolveRoute("minimax-m3", "", "go"), "anthropic-messages");
+	assert.equal(resolveRoute("minimax-m3", "", "console"), "openai-completions");
+	assert.equal(resolveRoute("gemini-3-pro", "", "console"), "google-generative-ai");
+	assert.equal(resolveRoute("gemini-3-pro", "", "go"), "openai-completions");
+	// npm wins over id heuristics.
+	assert.equal(resolveRoute("grok-3", "@ai-sdk/anthropic"), "anthropic-messages");
+	// Explicit npm packages keep their mapping.
+	assert.equal(resolveRoute("anything", "@ai-sdk/openai"), "openai-responses");
+	// gpt-/claude- ids keep pre-existing routes.
+	assert.equal(resolveRoute("gpt-6-luna", ""), "openai-responses");
+	assert.equal(resolveRoute("claude-fable-5", ""), "anthropic-messages");
+});

@@ -1,14 +1,16 @@
 {
   "name": "pi-provider-opencode-console",
   "version": "0.1.0",
-  "description": "Pi provider for OpenCode Console via device-auth login and live model discovery",
+  "description": "Pi providers for OpenCode Console and Go: device-auth login + service keys, live model discovery",
   "type": "module",
   "license": "MIT",
   "keywords": [
-    "pi-package",
-    "pi-extension",
+    "ai-provider",
     "opencode-console",
-    "ai-provider"
+    "opencode-go",
+    "pi-extension",
+    "pi-package",
+    "service-keys"
   ],
   "repository": {
     "type": "git",
