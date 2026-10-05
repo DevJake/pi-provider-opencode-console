@@ -18,6 +18,12 @@ export const CONSOLE_ALIAS_HOST = "console.opencode.ai";
 export const OPENCODE_CLIENT_ID = "opencode-cli";
 export const OPENCODE_CLIENT = "pi-provider-opencode-console";
 export const PROVIDER_ID = "opencode-console";
+/**
+ * Go-mode provider id — sibling of `opencode-console` for OpenCode's Go
+ * (subscription) auth system. Deliberately distinct from pi's built-in
+ * `opencode-go` so the built-in static catalog/credential stays untouched.
+ */
+export const GO_PROVIDER_ID = "opencode-go-console";
 
 /**
  * Resolve the auth.json location lazily so tests can redirect `HOME`
@@ -309,13 +315,23 @@ export async function ensureFreshSession(
 
 // --- auth.json persistence (standard pi shape) ---
 
-interface AuthJsonEntry {
+/** OAuth credential entries, as persisted by pi's runtime (plus our `env` block). */
+interface OAuthJsonEntry {
 	type: "oauth";
 	refresh: string;
 	access: string;
 	expires: number;
 	env?: Record<string, string>;
 }
+
+/** Stored api-key credential entries (pi's canonical service-key shape). */
+interface ApiKeyJsonEntry {
+	type: "api_key";
+	key?: string;
+	env?: Record<string, string>;
+}
+
+type AuthJsonEntry = OAuthJsonEntry | ApiKeyJsonEntry;
 
 interface AuthJson {
 	[providerId: string]: AuthJsonEntry | undefined;
@@ -340,10 +356,8 @@ async function writeAuthJson(auth: AuthJson): Promise<void> {
 	await writeFile(authFile(), JSON.stringify(auth, null, 2), { mode: 0o600 });
 }
 
-export async function loadSession(): Promise<ConsoleSession | undefined> {
-	const auth = await readAuthJson();
-	const entry = auth[PROVIDER_ID];
-	if (!entry || entry.type !== "oauth") return undefined;
+/** Rebuild a ConsoleSession from a persisted oauth entry (env block + tokens). */
+function sessionFromEntry(entry: OAuthJsonEntry): ConsoleSession | undefined {
 	const env = entry.env ?? {};
 	let orgs: ConsoleOrg[] = [];
 	const rawOrgs = env.OPENCODE_CONSOLE_ORGS;
@@ -365,6 +379,61 @@ export async function loadSession(): Promise<ConsoleSession | undefined> {
 		...(env.OPENCODE_CONSOLE_ORG_ID ? { orgId: env.OPENCODE_CONSOLE_ORG_ID } : {}),
 		...(env.OPENCODE_CONSOLE_ORG_NAME ? { orgName: env.OPENCODE_CONSOLE_ORG_NAME } : {}),
 	};
+}
+
+export async function loadSession(providerId: string = PROVIDER_ID): Promise<ConsoleSession | undefined> {
+	return (await loadCredential(providerId) as OAuthStoredCredential | undefined)?.session;
+}
+
+/** Service key resolved from a stored `api_key` entry. */
+export interface ApiKeyStoredCredential {
+	kind: "api_key";
+	key: string;
+}
+/** Device-flow session rebuilt from a stored `oauth` entry. */
+export interface OAuthStoredCredential {
+	kind: "oauth";
+	session: ConsoleSession;
+}
+export type StoredCredential = ApiKeyStoredCredential | OAuthStoredCredential;
+
+/**
+ * Resolve a stored service-key value: whole-string `$VAR` / `${VAR}`
+ * templates are resolved from the environment (matching pi's read-time
+ * template resolution for `api_key` entries); anything else is literal.
+ * Shell-command forms (`!cmd`) are not supported by this direct reader.
+ */
+function resolveApiKeyEntry(raw: string | undefined): string | undefined {
+	const value = raw?.trim();
+	if (!value) return undefined;
+	const template = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$|^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(value);
+	if (template) {
+		const name = template[1] ?? template[2]!;
+		return process.env[name] || undefined;
+	}
+	return value;
+}
+
+/**
+ * Read the provider's auth.json entry (direct file access so commands and
+ * stream wrappers share one view of *which* credential type is stored).
+ * Service keys (`type: "api_key"`) and device-flow sessions
+ * (`type: "oauth"`) are mutually exclusive per provider id — pi's runtime
+ * stores exactly one credential per provider id.
+ */
+export async function loadCredential(providerId: string = PROVIDER_ID): Promise<StoredCredential | undefined> {
+	const auth = await readAuthJson();
+	const entry = auth[providerId];
+	if (!entry) return undefined;
+	if (entry.type === "api_key") {
+		const key = resolveApiKeyEntry(entry.key);
+		return key ? { kind: "api_key", key } : undefined;
+	}
+	if (entry.type === "oauth") {
+		const session = sessionFromEntry(entry);
+		return session ? { kind: "oauth", session } : undefined;
+	}
+	return undefined;
 }
 
 /**
@@ -395,9 +464,10 @@ export function envForSession(
 export async function saveSession(
 	session: ConsoleSession,
 	fetchedOrgs?: ConsoleOrg[],
+	providerId: string = PROVIDER_ID,
 ): Promise<void> {
 	const auth = await readAuthJson();
-	auth[PROVIDER_ID] = {
+	auth[providerId] = {
 		type: "oauth",
 		refresh: session.refreshToken,
 		access: session.accessToken,
@@ -407,9 +477,41 @@ export async function saveSession(
 	await writeAuthJson(auth);
 }
 
-export async function deleteSession(): Promise<void> {
+export async function deleteSession(providerId: string = PROVIDER_ID): Promise<void> {
 	const auth = await readAuthJson();
-	delete auth[PROVIDER_ID];
+	delete auth[providerId];
+	await writeAuthJson(auth);
+}
+
+/** Masked rendering for command status output — never expose the full key. */
+export function summarizeKey(key: string): string {
+	return key.length <= 12 ? "sk-…" : `${key.slice(0, 6)}…${key.slice(-4)}`;
+}
+
+/**
+ * Copy the shared Console device-flow session's rotated token fields into
+ * the sibling provider's oauth entry (when present and oauth-typed) after a
+ * canonical refresh, so refresh-token rotation keeps both provider entries
+ * valid. Only the token fields are mirrored: each entry keeps its own `env`,
+ * so a per-provider organization choice survives a sibling's refresh.
+ * Service-key entries and missing entries are left untouched.
+ */
+export async function mirrorOAuthTokens(
+	session: ConsoleSession,
+	from: string,
+	to: string,
+): Promise<void> {
+	if (from === to) return;
+	const auth = await readAuthJson();
+	const target = auth[to];
+	if (!target || target.type !== "oauth") return;
+	auth[to] = {
+		...target,
+		type: "oauth",
+		refresh: session.refreshToken,
+		access: session.accessToken,
+		expires: session.expiresAt,
+	};
 	await writeAuthJson(auth);
 }
 

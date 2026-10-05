@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -320,4 +320,195 @@ test("saveSession persists the org list and loadSession restores it", async () =
 		process.env.HOME = prevHome;
 		await rm(fakeHome, { recursive: true, force: true });
 	}
+});
+
+// --- service-key (api_key credential) support ---
+
+import {
+	deleteSession,
+	loadCredential,
+	mirrorOAuthTokens,
+	summarizeKey,
+	GO_PROVIDER_ID,
+	type ApiKeyStoredCredential,
+	type OAuthStoredCredential,
+} from "../src/auth.ts";
+
+async function withFakeHome(
+	authJson: object,
+	fn: () => Promise<void>,
+): Promise<void> {
+	const fakeHome = join(tmpdir(), `pi-opencode-auth-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	await mkdir(join(fakeHome, ".pi", "agent"), { recursive: true });
+	await writeFile(join(fakeHome, ".pi", "agent", "auth.json"), JSON.stringify(authJson), { mode: 0o600 });
+	const prevHome = process.env.HOME;
+	process.env.HOME = fakeHome;
+	try {
+		await fn();
+	} finally {
+		if (prevHome === undefined) {
+			delete process.env.HOME;
+		} else {
+			process.env.HOME = prevHome;
+		}
+		await rm(fakeHome, { recursive: true, force: true });
+	}
+}
+
+test("loadCredential resolves a stored service key (api_key entry)", async () => {
+	await withFakeHome(
+		{ [PROVIDER_ID]: { type: "api_key", key: "  sk-testkey-abcdef0123456789  " } },
+		async () => {
+			const cred = (await loadCredential()) as ApiKeyStoredCredential;
+			assert.equal(cred.kind, "api_key");
+			assert.equal(cred.key, "sk-testkey-abcdef0123456789");
+		},
+	);
+});
+
+test("loadCredential treats an empty api_key entry as missing", async () => {
+	await withFakeHome(
+		{ [PROVIDER_ID]: { type: "api_key", key: "   " } },
+		async () => {
+			assert.equal(await loadCredential(), undefined);
+		},
+	);
+});
+
+test("loadCredential rebuilds the oauth session entry", async () => {
+	const session = {
+		server: "https://console.example.test",
+		accessToken: "at",
+		refreshToken: "rt",
+		expiresAt: Date.now() + 60 * 60_000,
+		accountId: "acct",
+		email: "u@example.test",
+		orgs: [{ id: "org-a", name: "Alpha" }],
+		orgId: "org-a",
+		orgName: "Alpha",
+	};
+	await withFakeHome({ [PROVIDER_ID]: await entryFor(session) }, async () => {
+		const cred = (await loadCredential()) as OAuthStoredCredential;
+		assert.equal(cred.kind, "oauth");
+		assert.equal(cred.session.email, "u@example.test");
+		assert.equal(cred.session.server, "https://console.example.test");
+		assert.equal(cred.session.orgId, "org-a");
+		assert.deepEqual(cred.session.orgs, [{ id: "org-a", name: "Alpha" }]);
+	});
+
+	function entryFor(s: (typeof session & { orgs: object[] })) {
+		return {
+			type: "oauth",
+			refresh: s.refreshToken,
+			access: s.accessToken,
+			expires: s.expiresAt,
+			env: {
+				OPENCODE_CONSOLE_SERVER: s.server,
+				OPENCODE_CONSOLE_ACCOUNT_ID: s.accountId,
+				OPENCODE_CONSOLE_EMAIL: s.email,
+				OPENCODE_CONSOLE_ORGS: JSON.stringify(s.orgs),
+				OPENCODE_CONSOLE_ORG_ID: s.orgId ?? "",
+				OPENCODE_CONSOLE_ORG_NAME: s.orgName ?? "",
+			},
+		};
+	}
+});
+
+test("loadCredential and deleteSession are per-provider-id", async () => {
+	await withFakeHome(
+		{
+			[PROVIDER_ID]: { type: "api_key", key: "sk-console-key-0001" },
+			[GO_PROVIDER_ID]: { type: "oauth", refresh: "rt", access: "at", expires: Date.now() + 60 * 60_000 },
+		},
+		async () => {
+			const consoleCred = (await loadCredential()) as ApiKeyStoredCredential;
+			assert.equal(consoleCred.kind, "api_key");
+			const goCred = (await loadCredential(GO_PROVIDER_ID)) as OAuthStoredCredential;
+			assert.equal(goCred.kind, "oauth");
+			await deleteSession(PROVIDER_ID);
+			assert.equal(await loadCredential(), undefined);
+			assert.ok(await loadCredential(GO_PROVIDER_ID));
+		},
+	);
+});
+
+test("loadCredential ignores unknown entry types", async () => {
+	await withFakeHome({ [PROVIDER_ID]: { type: "wellknown", key: "x", token: "y" } }, async () => {
+		assert.equal(await loadCredential(), undefined);
+	});
+});
+
+test("summarizeKey masks service keys", () => {
+	assert.equal(summarizeKey("sk-abcdef0123456789abcdef0123456789"), "sk-abc…6789");
+	assert.equal(summarizeKey("sk-short"), "sk-…");
+});
+
+test("mirrorOAuthTokens rotates the sibling oauth entry (tokens + env)", async () => {
+	await withFakeHome(
+		{
+			[PROVIDER_ID]: { type: "oauth", refresh: "rt-old", access: "at-old", expires: 1 },
+			[GO_PROVIDER_ID]: {
+				type: "oauth",
+				refresh: "rt-go-old",
+				access: "at-go-old",
+				expires: 2,
+				env: { OPENCODE_CONSOLE_ORG_ID: "org-go-stale" },
+			},
+		},
+		async () => {
+			const session = {
+				server: "https://console.example.test",
+				accessToken: "at-new",
+				refreshToken: "rt-new",
+				expiresAt: Date.now() + 60 * 60_000,
+				accountId: "acct",
+				email: "u@example.test",
+				orgs: [{ id: "org-a", name: "Alpha" }],
+				orgId: "org-a",
+				orgName: "Alpha",
+			};
+			await mirrorOAuthTokens(session, PROVIDER_ID, GO_PROVIDER_ID);
+			const goCred = (await loadCredential(GO_PROVIDER_ID)) as OAuthStoredCredential;
+			assert.equal(goCred.kind, "oauth");
+			assert.equal(goCred.session.accessToken, "at-new");
+			assert.equal(goCred.session.refreshToken, "rt-new");
+			// Token fields only: the sibling's own env (org choice) survives.
+			assert.equal(goCred.session.orgId, "org-go-stale");
+			// Console entry untouched.
+			const consoleCred = (await loadCredential()) as OAuthStoredCredential;
+			assert.equal(consoleCred.session.refreshToken, "rt-old");
+		},
+	);
+});
+
+test("mirrorOAuthTokens skips missing and api-key siblings", async () => {
+	await withFakeHome(
+		{ [PROVIDER_ID]: { type: "oauth", refresh: "rt", access: "at", expires: 1 } },
+		async () => {
+			const session = {
+				server: DEFAULT_CONSOLE_SERVER,
+				accessToken: "n",
+				refreshToken: "r",
+				expiresAt: 9,
+				accountId: "a",
+				email: "e",
+				orgs: [],
+			};
+			// Missing sibling: no entry created, no throw.
+			await mirrorOAuthTokens(session, PROVIDER_ID, "nonexistent");
+			assert.equal(await loadCredential("nonexistent"), undefined);
+			// Service-key sibling: untouched.
+			// (Write an api_key entry, mirror, verify it stays.)
+			const raw = await readFile(join(process.env.HOME!, ".pi", "agent", "auth.json"), "utf8");
+			const auth = JSON.parse(raw) as Record<string, Record<string, unknown>>;
+			auth["opencode-key-slot"] = { type: "api_key", key: "sk-x-123456789011" };
+			await writeFile(join(process.env.HOME!, ".pi", "agent", "auth.json"), JSON.stringify(auth), { mode: 0o600 });
+			await mirrorOAuthTokens(session, PROVIDER_ID, "opencode-key-slot");
+			const after = JSON.parse(
+				await readFile(join(process.env.HOME!, ".pi", "agent", "auth.json"), "utf8"),
+			) as Record<string, { type: string; key?: string }>;
+			assert.equal(after["opencode-key-slot"]!.type, "api_key");
+			assert.equal(after["opencode-key-slot"]!.key, "sk-x-123456789011");
+		},
+	);
 });

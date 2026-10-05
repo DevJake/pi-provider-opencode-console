@@ -342,3 +342,56 @@ test("streamConsole does not retry after content has been forwarded", async () =
 		},
 	);
 });
+
+test("streamConsole treats a service-key 401 as terminal (no refresh retry)", async () => {
+	let calls = 0;
+	let refreshes = 0;
+	await withFakeServer(
+		() => {
+			calls++;
+			return { status: 401, body: "unauthorized", contentType: "application/json" };
+		},
+		async (baseUrl) => {
+			const model = makeModel(`${baseUrl}/v1`);
+			const stream = streamConsole(model, makeContext("hi"), {
+				accessToken: "sk-rejected-key",
+				serviceKey: true,
+				refreshSession: async () => {
+					refreshes++;
+					return { accessToken: "unused", serviceKey: true };
+				},
+			});
+			let error: string | undefined;
+			for await (const event of stream) {
+				if (event.type === "error") {
+					error = event.error.errorMessage;
+					break;
+				}
+			}
+			assert.match(error ?? "", /401|Unauthorized|error/i);
+			assert.equal(refreshes, 0);
+			assert.equal(calls, 1);
+		},
+	);
+});
+
+test("streamConsole omits org identity headers for service-key requests", async () => {
+	let header: string | undefined;
+	await withFakeServer(
+		(req) => {
+			header = req.headers["x-opencode-org-id"];
+			return { body: makeOpenAiCompletionsSSE("ok") };
+		},
+		async (baseUrl) => {
+			const model = makeModel(`${baseUrl}/v1`);
+			const stream = streamConsole(model, makeContext("hi"), {
+				accessToken: "sk-service-key",
+				serviceKey: true,
+			});
+			for await (const event of stream) {
+				if (event.type === "error") throw new Error("unexpected error: " + event.error.errorMessage);
+			}
+			assert.equal(header, undefined);
+		},
+	);
+});
